@@ -3,11 +3,32 @@ import json
 import datetime
 import win32file
 import win32api
+import re
+import pywintypes
 
-DIRECTORY_PATH = r"D:\takeout-20230205T072154Z-001\Takeout\Google Photos\Untitled(2)"
+DIRECTORY_PATH = r"D:\takeout-20230205T072154Z-001\Takeout\Google Photos\Photos from 2005"
 # DIRECTORY_PATH = r"."
 TARGET_FOLDER_NAME = "sorted_photos"
 DATE_FORMAT = "%Y-%m-%d"
+
+# Supported file extensions
+SUPPORTED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".mp4", ".mov"]
+
+
+def is_supported_file(filename):
+    """
+    Check if the given filename has a supported file extension.
+    """
+    file_extension = os.path.splitext(filename)[-1].lower()
+    return file_extension in SUPPORTED_EXTENSIONS
+
+
+def timestamp_to_filetime(timestamp):
+    """
+    Convert a timestamp to a FILETIME object.
+    """
+    file_time = datetime.datetime.utcfromtimestamp(timestamp // 10 ** 7 - 11644473600)
+    return pywintypes.Time(file_time)
 
 
 def get_photo_metadata(photo_file_path):
@@ -24,20 +45,16 @@ def get_photo_metadata(photo_file_path):
         metadata = json.load(f)
         # print(metadata)
 
-    required_fields = ["title", "photoTakenTime", "url"]
+    required_fields = ["title", "photoTakenTime", "url"] if is_supported_file(photo_file_path) else ["title",
+                                                                                                     "videoTakenTime",
+                                                                                                     "url"]
     # if not all(field in metadata for field in required_fields):
     #     print(f"Skipping {photo_file_path} due to missing required fields in JSON file.")
     #     return None
     for field in required_fields:
-        # if field in metadata:
-        # print(f"find field: {field}")
         if field not in metadata:
             print(f"Skipping {photo_file_path} due to missing {field} field in JSON file: {metadata}")
             return None
-    # print(f"Loaded metadata for {photo_file_path}.")
-    # print("title:", metadata['title'])
-    # print("photoTakenTime:", metadata['photoTakenTime'])
-    # print("url:", metadata['url'])
     return metadata
 
 
@@ -45,8 +62,12 @@ def get_photo_date(metadata):
     """
     Given photo metadata, extracts and returns the date the photo was taken.
     """
-    date_string = metadata["photoTakenTime"]["formatted"]
+    date_string = metadata["photoTakenTime"]["formatted"] if "photoTakenTime" in metadata else \
+        metadata["videoTakenTime"]["formatted"]
+
     date_string = date_string.encode('utf-8').decode('unicode_escape')  # Decode the string to remove Unicode characters
+    date_string = re.sub(r'[^\x00-\x7F]', lambda x: ' ',
+                         date_string)  # Replace non-ASCII characters with a regular space
     return datetime.datetime.strptime(date_string, "%b %d, %Y, %I:%M:%S %p UTC").date()
 
 
@@ -58,22 +79,7 @@ def get_target_folder_path(photo_date):
     return os.path.join(DIRECTORY_PATH, TARGET_FOLDER_NAME, target_folder_name)
 
 
-def create_target_folder(target_folder_path):
-    """
-    Creates the target folder if it does not already exist.
-    """
-    if not os.path.exists(target_folder_path):
-        os.makedirs(target_folder_path)
-        # Set the folder's date taken attribute to the beginning of the day
-        # to allow for correct sorting in Windows Explorer.
-        date_time = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
-        timestamp = int((date_time - datetime.datetime(1601, 1, 1)).total_seconds() * 10 ** 7)
-        file_time = win32file.FILETIME(timestamp)
-        win32file.SetFileAttributes(target_folder_path, win32file.FILE_ATTRIBUTE_DIRECTORY)
-        win32file.SetFileTime(win32api.GetFileAttributes(target_folder_path), file_time, file_time, file_time)
-
-
-def move_photo_to_folder(photo_file_path):
+def move_photo_to_folder(photo_file_path, metadata):
     """
     Moves the photo file and JSON metadata file to the sorted_photos folder and JSON folder, respectively.
     """
@@ -97,6 +103,18 @@ def move_photo_to_folder(photo_file_path):
     json_file_path = photo_file_path + ".json"
     os.rename(json_file_path, target_json_file_path)
 
+    # Set the photo's date created attribute to the photo taken date
+    photo_date = get_photo_date(metadata)
+    date_time = datetime.datetime.combine(photo_date, datetime.time.min).replace(microsecond=0)
+    timestamp = int((date_time - datetime.datetime(1970, 1, 1)).total_seconds()) * 10 ** 7 + 116444736000000000
+
+    file_time = timestamp_to_filetime(timestamp)
+
+    h_file = win32file.CreateFile(target_photo_file_path, win32file.GENERIC_WRITE, 0, None, win32file.OPEN_EXISTING, 0,
+                                  None)
+    win32file.SetFileTime(h_file, file_time, None, None)  # Set the creation time
+    h_file.Close()
+
     # print(f"Processed {photo_file_path} -> sorted_photos and JSON")
 
 
@@ -105,13 +123,13 @@ def process_photo(photo_file_path):
     Given a filepath to a photo, processes the photo by moving it to the sorted_photos folder and its metadata
     to the JSON folder.
     """
-    metadata = get_photo_metadata(photo_file_path)
-    if metadata is None:
-        print(f"Skipping {photo_file_path} due to missing required fields in JSON file.")
-        return
-
-    move_photo_to_folder(photo_file_path)
-    # print(f"Processed {photo_file_path} -> sorted_photos")
+    if os.path.isfile(photo_file_path) and is_supported_file(photo_file_path):
+        metadata = get_photo_metadata(photo_file_path)
+        if metadata is None:
+            print(f"Skipping {photo_file_path} due to missing required fields in JSON file.")
+            return
+        move_photo_to_folder(photo_file_path, metadata)
+        # print(f"Processed {photo_file_path} -> sorted_photos")
 
 
 def main():
